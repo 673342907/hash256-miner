@@ -12,7 +12,7 @@ const RPC_URL = process.env.RPC_URL || "https://ethereum-rpc.publicnode.com";
 const JSON_MODE = process.argv.includes("--json");
 const JOURNAL_UNITS = ["hash256-solo-gpu", "hash256-master"];
 const LOG_SCAN_LINES = 2000;
-const TRANSFER_SCAN_STEP = 200_000;
+const DEFAULT_TRANSFER_SCAN_STEP = Number(process.env.REPORT_LOG_BLOCK_RANGE || "50000");
 
 const ABI = [
   {
@@ -220,20 +220,38 @@ function summarizeRuntimeFromJournal(lines) {
   };
 }
 
+function isBlockRangeLimitError(error) {
+  const message = String(error?.message || error?.shortMessage || "");
+  return /maximum block range|exceed maximum block range|block range/i.test(message);
+}
+
 async function queryMintedTransfers(contract, walletAddress, latestBlock) {
   const filter = contract.filters.Transfer(ZeroAddress, walletAddress);
   let total = 0n;
   let count = 0;
   let lastBlock = null;
+  let step = Math.max(1, DEFAULT_TRANSFER_SCAN_STEP);
 
-  for (let fromBlock = 0; fromBlock <= latestBlock; fromBlock += TRANSFER_SCAN_STEP) {
-    const toBlock = Math.min(latestBlock, fromBlock + TRANSFER_SCAN_STEP - 1);
-    const logs = await contract.queryFilter(filter, fromBlock, toBlock);
+  for (let fromBlock = 0; fromBlock <= latestBlock;) {
+    const toBlock = Math.min(latestBlock, fromBlock + step - 1);
+    let logs;
+    try {
+      logs = await contract.queryFilter(filter, fromBlock, toBlock);
+    } catch (error) {
+      if (!isBlockRangeLimitError(error) || step === 1) {
+        throw error;
+      }
+      step = Math.max(1, Math.floor(step / 2));
+      continue;
+    }
+
     for (const log of logs) {
       total += BigInt(log.args?.value ?? 0n);
       count += 1;
       lastBlock = log.blockNumber;
     }
+
+    fromBlock = toBlock + 1;
   }
 
   return { total, count, lastBlock };
