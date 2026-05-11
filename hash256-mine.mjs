@@ -659,7 +659,8 @@ class WorkerAgent {
           challengeHex: job.challengeHex,
           difficultyHex: job.difficultyHex,
           prefixHex,
-          batchSize: this.batchSize.toString()
+          batchSize: this.batchSize.toString(),
+          innerLoops: DEFAULT_WORKER_INNER_LOOPS
         }
       });
 
@@ -763,7 +764,7 @@ function runSearchWorker() {
       await minerModule.default(wasmBytes);
     }
 
-      const miner = new minerModule.Miner(challengeBytes, difficultyBytes, prefixBytes);
+    const miner = new minerModule.Miner(challengeBytes, difficultyBytes, prefixBytes);
     const innerLoops = workerData.innerLoops ?? DEFAULT_WORKER_INNER_LOOPS;
 
     const loop = () => {
@@ -865,6 +866,7 @@ Environment:
   MIN_GAS_BALANCE      Minimum ETH balance required on master wallet
   WORKERS              Worker thread count per worker agent
   BATCH_SIZE           Search batch size per local miner thread
+  WORKER_INNER_LOOPS   WASM search batches per event-loop tick, default 8
   AGENT_NAME           Worker display name
   RECONNECT_MS         Worker reconnect delay
 
