@@ -4,6 +4,8 @@ hash256-wallet.json
 .env.master
 .env.worker
 .env.solo-gpu
+.run/
+logs/
 ips.txt
 workers.txt
 temp-deploy-key.pem

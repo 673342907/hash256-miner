@@ -13,6 +13,11 @@
     "worker": "node hash256-mine.mjs worker",
     "worker:gpu": "node hash256-gpu-worker.mjs",
     "solo:gpu": "node hash256-solo-gpu.mjs",
+    "solo:gpu:start": "bash ./solo-gpu-daemon.sh start",
+    "solo:gpu:stop": "bash ./solo-gpu-daemon.sh stop",
+    "solo:gpu:restart": "bash ./solo-gpu-daemon.sh restart",
+    "solo:gpu:status": "bash ./solo-gpu-daemon.sh status",
+    "solo:gpu:logs": "bash ./solo-gpu-daemon.sh logs",
     "gpu:build": "cmake -S gpu-miner -B gpu-miner/build && cmake --build gpu-miner/build --config Release",
     "gpu:build:release": "cmake --build gpu-miner/build --config Release",
     "mine": "node hash256-mine.mjs master"

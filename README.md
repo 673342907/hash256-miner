@@ -252,6 +252,22 @@ sudo journalctl -u hash256-solo-gpu -f
 sudo systemctl restart hash256-solo-gpu
 ```
 
+If your environment does not use `systemd` (for example a container), use the built-in daemon script instead:
+
+```bash
+chmod +x solo-gpu-daemon.sh
+npm run solo:gpu:start
+npm run solo:gpu:status
+npm run solo:gpu:logs
+```
+
+Stop or restart:
+
+```bash
+npm run solo:gpu:stop
+npm run solo:gpu:restart
+```
+
 Required:
 
 - set `PRIVATE_KEY` in `.env.solo-gpu`
