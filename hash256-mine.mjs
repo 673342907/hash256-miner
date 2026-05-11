@@ -45,6 +45,16 @@ function parseBatchSize(value) {
 }
 
 const DEFAULT_BATCH_SIZE = parseBatchSize(process.env.BATCH_SIZE);
+
+function parseInnerLoops(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return 8;
+  }
+  return Math.min(256, Math.floor(parsed));
+}
+
+const DEFAULT_WORKER_INNER_LOOPS = parseInnerLoops(process.env.WORKER_INNER_LOOPS);
 const DEFAULT_AGENT_NAME =
   process.env.AGENT_NAME && process.env.AGENT_NAME.toLowerCase() !== "auto"
     ? process.env.AGENT_NAME
@@ -753,7 +763,8 @@ function runSearchWorker() {
       await minerModule.default(wasmBytes);
     }
 
-    const miner = new minerModule.Miner(challengeBytes, difficultyBytes, prefixBytes);
+      const miner = new minerModule.Miner(challengeBytes, difficultyBytes, prefixBytes);
+    const innerLoops = workerData.innerLoops ?? DEFAULT_WORKER_INNER_LOOPS;
 
     const loop = () => {
       if (!running) {
@@ -761,30 +772,38 @@ function runSearchWorker() {
         process.exit(0);
       }
 
-      const batchStart = Date.now();
-      const result = miner.search(counter, batchSize);
-      let hashesDelta = batchSize;
-      if (result) {
-        hashesDelta = result.hashes;
-      }
-      counter += hashesDelta;
+      const tickStart = Date.now();
+      let tickHashes = 0n;
+      let hit = null;
 
-      const elapsedMs = Math.max(1, Date.now() - batchStart);
-      const hashrate = Number(hashesDelta) / (elapsedMs / 1000);
+      for (let i = 0; i < innerLoops && running; i += 1) {
+        const result = miner.search(counter, batchSize);
+        const hashesDelta = result ? result.hashes : batchSize;
+        counter += hashesDelta;
+        tickHashes += hashesDelta;
+
+        if (result) {
+          hit = result;
+          break;
+        }
+      }
+
+      const elapsedMs = Math.max(1, Date.now() - tickStart);
+      const hashrate = Number(tickHashes) / (elapsedMs / 1000);
 
       parentPort.postMessage({
         type: "progress",
-        hashesDelta: hashesDelta.toString(),
+        hashesDelta: tickHashes.toString(),
         hashrate
       });
 
-      if (result) {
+      if (hit) {
         parentPort.postMessage({
           type: "found",
-          nonceHex: hexlify(result.nonce),
-          resultHex: hexlify(result.result)
+          nonceHex: hexlify(hit.nonce),
+          resultHex: hexlify(hit.result)
         });
-        result.free?.();
+        hit.free?.();
         miner.free?.();
         process.exit(0);
       }

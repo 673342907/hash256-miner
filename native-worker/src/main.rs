@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
-use tiny_keccak::{Hasher, Keccak};
+use sha3::{Digest, Keccak256};
 
 #[derive(Serialize)]
 struct RegisterMessage<'a> {
@@ -120,12 +120,16 @@ fn prefix_bytes(seed: [u8; 16], slot: u32, thread_index: u32) -> [u8; 24] {
     out
 }
 
-fn hash_less_than_difficulty(challenge: &[u8; 32], nonce: &[u8; 32], difficulty: &[u8; 32]) -> Option<[u8; 32]> {
-    let mut keccak = Keccak::v256();
-    let mut result = [0u8; 32];
-    keccak.update(challenge);
-    keccak.update(nonce);
-    keccak.finalize(&mut result);
+fn hash_less_than_difficulty(
+    hasher: &mut Keccak256,
+    challenge: &[u8; 32],
+    nonce: &[u8; 32],
+    difficulty: &[u8; 32],
+) -> Option<[u8; 32]> {
+    hasher.update(challenge.as_slice());
+    hasher.update(nonce.as_slice());
+    let out = hasher.finalize_reset();
+    let result: [u8; 32] = out.into();
     if result < *difficulty {
         Some(result)
     } else {
@@ -142,6 +146,7 @@ fn search_loop(
     sender: mpsc::Sender<WorkerEvent>,
 ) {
     let mut counter: u64 = 0;
+    let mut keccak = Keccak256::new();
 
     while running.load(Ordering::Relaxed) {
         let started = Instant::now();
@@ -156,7 +161,7 @@ fn search_loop(
             nonce[..24].copy_from_slice(&prefix);
             nonce[24..32].copy_from_slice(&counter.to_be_bytes());
 
-            if let Some(result) = hash_less_than_difficulty(&challenge, &nonce, &difficulty) {
+            if let Some(result) = hash_less_than_difficulty(&mut keccak, &challenge, &nonce, &difficulty) {
                 let _ = sender.send(WorkerEvent::Found {
                     nonce_hex: format!("0x{}", hex::encode(nonce)),
                     result_hex: format!("0x{}", hex::encode(result)),

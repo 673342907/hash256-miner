@@ -8,3 +8,4 @@ workers.txt
 temp-deploy-key.pem
 *.pem
 hash256-ubuntu-upload.zip
+gpu-miner/build/
