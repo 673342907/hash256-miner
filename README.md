@@ -14,11 +14,32 @@ Worker agents:
 - receive mining jobs
 - search for valid nonces locally
 - report solutions back to the master
+- can run as Node CPU workers, Rust native CPU workers, or OpenCL GPU workers
 
 ## Install
 
 ```bash
 npm install
+```
+
+## GPU Worker Build
+
+Build the OpenCL GPU miner on Ubuntu:
+
+```bash
+npm run gpu:build
+```
+
+Default binary path on Ubuntu:
+
+```text
+gpu-miner/build/hash256-gpu-miner
+```
+
+If you already created the build directory and only want to rebuild:
+
+```bash
+npm run gpu:build:release
 ```
 
 ## One-click Ubuntu deploy
@@ -197,6 +218,69 @@ You can run many workers at once. Each worker receives the same challenge but a 
 Example env file:
 - `.env.worker.example`
 
+### Run a solo GPU miner on one Ubuntu server
+
+If your 4090 server should both hold the wallet and do the mining, use the solo GPU mode. You only need to provide the wallet private key; the script writes `.env.master` and `.env.worker` automatically and starts both `master` and `gpu worker` on localhost.
+
+```bash
+cp .env.solo-gpu.example .env.solo-gpu
+nano .env.solo-gpu
+npm run gpu:build
+npm run solo:gpu
+```
+
+Required:
+
+- set `PRIVATE_KEY` in `.env.solo-gpu`
+
+Defaults chosen for a single Ubuntu GPU host:
+
+- `MASTER_BIND_HOST=127.0.0.1`
+- `MASTER_PUBLIC_HOST=127.0.0.1`
+- `MASTER_HOST=127.0.0.1`
+- auto-generated `MASTER_TOKEN`
+- `AGENT_NAME=gpu-4090`
+- `GPU_PLATFORM=0`
+- `GPU_DEVICE=0`
+- `GPU_GLOBAL_WORK_SIZE=4194304`
+- `GPU_LOCAL_WORK_SIZE=256`
+
+The mining rewards will be sent to the wallet derived from the `PRIVATE_KEY` in `.env.solo-gpu`.
+
+### Run a GPU worker
+
+The GPU worker connects directly to the existing `master` TCP protocol, automatically receives jobs, starts the GPU miner process, sends progress updates, and reports hits back to the master.
+
+Ubuntu example when the master already exists elsewhere:
+
+```bash
+export MASTER_HOST="your-master-ip"
+export MASTER_PORT="7331"
+export MASTER_TOKEN="replace-this"
+export AGENT_NAME="gpu-01"
+export WORKER_RUNTIME="gpu"
+export GPU_EXECUTABLE="gpu-miner/build/hash256-gpu-miner"
+export GPU_PLATFORM="0"
+export GPU_DEVICE="0"
+npm run worker:gpu
+```
+
+Recommended tuning variables:
+
+- `GPU_PLATFORM`: OpenCL platform index
+- `GPU_DEVICE`: GPU device index under the selected platform
+- `GPU_GLOBAL_WORK_SIZE`: work items per dispatch, default `1048576`
+- `GPU_LOCAL_WORK_SIZE`: work-group size, default `256`, use `0` to let the driver choose
+- `GPU_PROGRESS_MS`: GPU progress log interval, default `1000`
+- `GPU_KERNEL_PATH`: optional explicit path to `keccak_miner.cl`
+
+Operational notes:
+
+- One `npm run worker:gpu` process controls one GPU device.
+- For multi-GPU hosts, start one process per GPU and set a different `GPU_DEVICE` and `AGENT_NAME` for each process.
+- The nonce prefix still comes from `jobSeedHex + agentSlot + threadIndex`, so GPU workers stay non-overlapping with existing CPU workers.
+- `WORKERS` and `BATCH_SIZE` are ignored by the GPU worker.
+
 ## systemd
 
 Master template:
@@ -238,6 +322,21 @@ node hash256-mine.mjs wallet
 node hash256-mine.mjs status
 node hash256-mine.mjs master
 node hash256-mine.mjs worker
+node hash256-gpu-worker.mjs
+node hash256-solo-gpu.mjs
+```
+
+npm shortcuts:
+
+```bash
+npm run wallet
+npm run status
+npm run master
+npm run worker
+npm run worker:gpu
+npm run solo:gpu
+npm run gpu:build
+npm run gpu:build:release
 ```
 
 ## Important
@@ -246,3 +345,4 @@ node hash256-mine.mjs worker
 - Do not copy `hash256-wallet.json` to worker machines.
 - Protect the master port with a firewall and a strong `MASTER_TOKEN`.
 - Use a stable Ethereum mainnet RPC for the master.
+- GPU workers require a working OpenCL runtime from the GPU vendor driver.

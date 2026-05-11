@@ -5,6 +5,7 @@ import net from "node:net";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
+import { loadDefaultEnvForCommand } from "./env-loader.mjs";
 import {
   Contract,
   JsonRpcProvider,
@@ -19,6 +20,8 @@ import {
   toBeHex,
   zeroPadValue
 } from "ethers";
+
+loadDefaultEnvForCommand(process.argv[2] || "");
 
 const CONTRACT_ADDRESS = "0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc";
 const WALLET_PATH = process.env.WALLET_PATH || "./hash256-wallet.json";
