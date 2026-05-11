@@ -1,0 +1,15 @@
+[Unit]
+Description=HASH256 solo GPU miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hash256-miner
+ExecStart=/usr/bin/node /opt/hash256-miner/hash256-solo-gpu.mjs
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

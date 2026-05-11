@@ -1,12 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 import process from "node:process";
-import { Contract, JsonRpcProvider, Wallet, formatEther } from "ethers";
+import { Contract, JsonRpcProvider, Wallet, ZeroAddress, formatEther } from "ethers";
+import { loadEnvFiles } from "./env-loader.mjs";
+
+loadEnvFiles([".env", ".env.master"]);
 
 const CONTRACT_ADDRESS = "0xAC7b5d06fa1e77D08aea40d46cB7C5923A87A0cc";
 const WALLET_PATH = process.env.WALLET_PATH || "./hash256-wallet.json";
-const MASTER_ENV_PATH = process.env.MASTER_ENV_PATH || "./.env.master";
-const RPC_URL = process.env.RPC_URL || readEnvValue("RPC_URL") || "https://ethereum-rpc.publicnode.com";
+const RPC_URL = process.env.RPC_URL || "https://ethereum-rpc.publicnode.com";
+const JSON_MODE = process.argv.includes("--json");
+const JOURNAL_UNITS = ["hash256-solo-gpu", "hash256-master"];
+const LOG_SCAN_LINES = 2000;
+const TRANSFER_SCAN_STEP = 200_000;
 
 const ABI = [
   {
@@ -42,173 +48,342 @@ const ABI = [
       { name: "epoch", type: "uint256" },
       { name: "epochBlocksLeft", type: "uint256" }
     ]
+  },
+  {
+    type: "event",
+    anonymous: false,
+    name: "Transfer",
+    inputs: [
+      { indexed: true, name: "from", type: "address" },
+      { indexed: true, name: "to", type: "address" },
+      { indexed: false, name: "value", type: "uint256" }
+    ]
   }
 ];
 
-function readEnvValue(key) {
-  if (!existsSync(MASTER_ENV_PATH)) {
+function safeExec(command) {
+  try {
+    return execSync(command, {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+  } catch {
     return "";
   }
-  const text = readFileSync(MASTER_ENV_PATH, "utf8");
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith(`${key}=`)) {
-      return line.slice(key.length + 1).trim();
-    }
-  }
-  return "";
 }
 
-function loadWalletAddress() {
-  const envPrivateKey = process.env.PRIVATE_KEY || readEnvValue("PRIVATE_KEY");
+function readWalletAddress() {
+  const envPrivateKey = process.env.PRIVATE_KEY;
   if (envPrivateKey) {
     return new Wallet(envPrivateKey).address;
   }
-  if (existsSync(WALLET_PATH)) {
-    const payload = JSON.parse(readFileSync(WALLET_PATH, "utf8"));
-    if (payload?.privateKey) {
-      return new Wallet(payload.privateKey).address;
-    }
-    if (payload?.address) {
-      return payload.address;
-    }
+
+  if (!existsSync(WALLET_PATH)) {
+    throw new Error(`wallet not found: ${WALLET_PATH}`);
   }
-  throw new Error("未找到主控钱包地址，请检查 .env.master 或 hash256-wallet.json");
+
+  const payload = JSON.parse(readFileSync(WALLET_PATH, "utf8"));
+  if (payload?.privateKey) {
+    return new Wallet(payload.privateKey).address;
+  }
+  if (payload?.address) {
+    return payload.address;
+  }
+
+  throw new Error(`cannot resolve wallet address from ${WALLET_PATH}`);
 }
 
-function formatHash(value) {
+function formatToken(value) {
+  const text = formatEther(value);
+  if (!text.includes(".")) {
+    return text;
+  }
+  return text.replace(/\.?0+$/, "");
+}
+
+function formatHashrateFromHps(value) {
+  return `${(Number(value || 0) / 1_000_000).toFixed(3)} MH/s`;
+}
+
+function parseHashrate(value, unit) {
+  const numeric = Number(value || 0);
+  if (unit === "MH/s") {
+    return numeric * 1_000_000;
+  }
+  return numeric;
+}
+
+function formatDifficulty(value) {
   const text = String(value);
   return `${text.slice(0, 10)}...${text.slice(-6)}`;
 }
 
-function formatMegahashFromHashrate(value) {
-  return `${(Number(value) / 1_000_000).toFixed(3)} MH/s`;
-}
-
-function colorize(text, color) {
-  const colors = {
-    red: "\x1b[31m",
-    green: "\x1b[32m",
-    reset: "\x1b[0m"
-  };
-  return `${colors[color] || ""}${text}${colors.reset}`;
-}
-
-function summarizeWorkersFromJournal() {
-  let output = "";
-  try {
-    output = execSync("journalctl -u hash256-master -n 400 --no-pager", {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"]
-    });
-  } catch {
-    return {
-      workers: [],
-      totalHashrate: null,
-      totalHashes: null
-    };
+function collectServiceState() {
+  const result = {};
+  for (const unit of JOURNAL_UNITS) {
+    const status = safeExec(`systemctl is-active ${unit}`);
+    if (status) {
+      result[unit] = status;
+    }
   }
+  return result;
+}
 
-  const workerMap = new Map();
+function collectJournalLines() {
+  const unitArgs = JOURNAL_UNITS.map(unit => `-u ${unit}`).join(" ");
+  const output = safeExec(`journalctl ${unitArgs} -n ${LOG_SCAN_LINES} --no-pager`);
+  return output ? output.split(/\r?\n/) : [];
+}
+
+function summarizeRuntimeFromJournal(lines) {
+  const workers = new Map();
   let totalHashrate = null;
   let totalHashes = null;
+  let confirmedTxCount = 0;
+  let submittedTxCount = 0;
+  let lastSubmittedTxHash = null;
+  let lastConfirmedBlock = null;
+  let lastConfirmedAt = null;
+  let lastSolutionNonce = null;
+  let lastSolutionAt = null;
+  let lastRound = null;
 
-  for (const line of output.split(/\r?\n/)) {
-    const totalMatch = line.match(/agents=(\d+)\s+hashrate=([0-9.]+)\s+H\/s\s+hashes=([0-9]+)/);
+  for (const line of lines) {
+    const timestampMatch = line.match(/\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]/);
+    const timestamp = timestampMatch?.[1] || null;
+
+    const totalMatch = line.match(/agents=(\d+)\s+hashrate=([0-9.]+)\s+(MH\/s|H\/s)\s+hashes=([0-9]+)/);
     if (totalMatch) {
-      totalHashrate = Number(totalMatch[2]);
-      totalHashes = totalMatch[3];
+      totalHashrate = parseHashrate(totalMatch[2], totalMatch[3]);
+      totalHashes = totalMatch[4];
     }
 
-    const workerMatch = line.match(/agent\s+(.+?)\s+\[([^\]]+)\]\s+slot=(\d+)\s+threads=(\d+)\s+hashrate=([0-9.]+)\s+H\/s\s+hashes=([0-9]+)/);
+    const workerMatch = line.match(
+      /agent\s+(.+?)\s+\[([^\]]+)\]\s+slot=(\d+)\s+threads=(\d+)\s+hashrate=([0-9.]+)\s+(MH\/s|H\/s)\s+hashes=([0-9]+)/
+    );
     if (workerMatch) {
       const ip = workerMatch[2];
-      workerMap.set(ip, {
-        名称: workerMatch[1],
-        IP: ip,
-        槽位: Number(workerMatch[3]),
-        线程: Number(workerMatch[4]),
-        哈希率数值: Number(workerMatch[5]),
-        哈希率: formatMegahashFromHashrate(workerMatch[5]),
-        已尝试哈希: workerMatch[6]
+      const hashrate = parseHashrate(workerMatch[5], workerMatch[6]);
+      workers.set(ip, {
+        name: workerMatch[1],
+        ip,
+        slot: Number(workerMatch[3]),
+        threads: Number(workerMatch[4]),
+        hashrate,
+        hashes: workerMatch[7]
       });
+    }
+
+    const roundMatch = line.match(/new round job=(\S+)\s+era=(\S+)\s+epoch=(\S+)\s+agents=(\d+)/);
+    if (roundMatch) {
+      lastRound = {
+        jobId: roundMatch[1],
+        era: roundMatch[2],
+        epoch: roundMatch[3],
+        agents: Number(roundMatch[4]),
+        seenAt: timestamp
+      };
+    }
+
+    const solutionMatch = line.match(/solution from .* nonce=(0x[a-fA-F0-9]+)/);
+    if (solutionMatch) {
+      lastSolutionNonce = solutionMatch[1];
+      lastSolutionAt = timestamp;
+    }
+
+    const submitMatch = line.match(/submitted tx (0x[a-fA-F0-9]+)/);
+    if (submitMatch) {
+      submittedTxCount += 1;
+      lastSubmittedTxHash = submitMatch[1];
+    }
+
+    const confirmMatch = line.match(/tx confirmed in block (\d+)/);
+    if (confirmMatch) {
+      confirmedTxCount += 1;
+      lastConfirmedBlock = Number(confirmMatch[1]);
+      lastConfirmedAt = timestamp;
     }
   }
 
   return {
-    workers: [...workerMap.values()],
+    workers: [...workers.values()].sort((a, b) => b.hashrate - a.hashrate || a.ip.localeCompare(b.ip)),
     totalHashrate,
-    totalHashes
+    totalHashes,
+    submittedTxCount,
+    confirmedTxCount,
+    lastSubmittedTxHash,
+    lastConfirmedBlock,
+    lastConfirmedAt,
+    lastSolutionNonce,
+    lastSolutionAt,
+    lastRound
   };
+}
+
+async function queryMintedTransfers(contract, walletAddress, latestBlock) {
+  const filter = contract.filters.Transfer(ZeroAddress, walletAddress);
+  let total = 0n;
+  let count = 0;
+  let lastBlock = null;
+
+  for (let fromBlock = 0; fromBlock <= latestBlock; fromBlock += TRANSFER_SCAN_STEP) {
+    const toBlock = Math.min(latestBlock, fromBlock + TRANSFER_SCAN_STEP - 1);
+    const logs = await contract.queryFilter(filter, fromBlock, toBlock);
+    for (const log of logs) {
+      total += BigInt(log.args?.value ?? 0n);
+      count += 1;
+      lastBlock = log.blockNumber;
+    }
+  }
+
+  return { total, count, lastBlock };
+}
+
+function renderTextReport(payload) {
+  const lines = [];
+
+  lines.push("HASH256 Mining Report");
+  lines.push(`wallet: ${payload.wallet.address}`);
+  lines.push(`rpc: ${payload.rpcUrl}`);
+  lines.push("");
+
+  lines.push("Mined");
+  lines.push(`minted total: ${payload.mined.totalHash} HASH`);
+  lines.push(`confirmed mined count: ${payload.mined.mintedCount}`);
+  lines.push(`wallet HASH balance: ${payload.wallet.hashBalance} HASH`);
+  lines.push(`wallet ETH balance: ${payload.wallet.ethBalance} ETH`);
+  if (payload.mined.lastMintBlock !== null) {
+    lines.push(`last mint block: ${payload.mined.lastMintBlock}`);
+  }
+  lines.push("");
+
+  lines.push("Runtime");
+  for (const [unit, status] of Object.entries(payload.runtime.services)) {
+    lines.push(`${unit}: ${status}`);
+  }
+  if (payload.runtime.totalHashrate !== null) {
+    lines.push(`total hashrate: ${payload.runtime.totalHashrateText}`);
+  }
+  if (payload.runtime.totalHashes !== null) {
+    lines.push(`current round hashes: ${payload.runtime.totalHashes}`);
+  }
+  lines.push(`submitted tx count: ${payload.runtime.submittedTxCount}`);
+  lines.push(`confirmed tx count: ${payload.runtime.confirmedTxCount}`);
+  if (payload.runtime.lastSubmittedTxHash) {
+    lines.push(`last submitted tx: ${payload.runtime.lastSubmittedTxHash}`);
+  }
+  if (payload.runtime.lastConfirmedBlock !== null) {
+    lines.push(`last confirmed block: ${payload.runtime.lastConfirmedBlock}`);
+  }
+  if (payload.runtime.lastConfirmedAt) {
+    lines.push(`last confirmed at: ${payload.runtime.lastConfirmedAt}`);
+  }
+  if (payload.runtime.lastSolutionNonce) {
+    lines.push(`last solution nonce: ${payload.runtime.lastSolutionNonce}`);
+  }
+  if (payload.runtime.lastRound) {
+    lines.push(
+      `last round: job=${payload.runtime.lastRound.jobId} era=${payload.runtime.lastRound.era} epoch=${payload.runtime.lastRound.epoch} agents=${payload.runtime.lastRound.agents}`
+    );
+  }
+  lines.push("");
+
+  lines.push("Workers");
+  if (payload.runtime.workers.length === 0) {
+    lines.push("no worker runtime data found in journal");
+  } else {
+    for (const worker of payload.runtime.workers) {
+      lines.push(
+        `${worker.ip} | ${worker.name} | slot=${worker.slot} | threads=${worker.threads} | hashrate=${formatHashrateFromHps(worker.hashrate)} | hashes=${worker.hashes}`
+      );
+    }
+  }
+  lines.push("");
+
+  lines.push("Chain");
+  lines.push(`genesis complete: ${payload.chain.genesisComplete}`);
+  lines.push(`genesis minted: ${payload.chain.genesisMinted} HASH`);
+  lines.push(`genesis eth raised: ${payload.chain.genesisEthRaised} ETH`);
+  lines.push(`current reward: ${payload.chain.currentReward} HASH`);
+  lines.push(`era: ${payload.chain.era}`);
+  lines.push(`epoch: ${payload.chain.epoch}`);
+  lines.push(`epoch blocks left: ${payload.chain.epochBlocksLeft}`);
+  lines.push(`difficulty: ${payload.chain.difficulty}`);
+  lines.push(`global mined: ${payload.chain.globalMiningMinted} HASH`);
+  lines.push(`global remaining: ${payload.chain.globalRemaining} HASH`);
+
+  return lines.join("\n");
 }
 
 async function main() {
   const provider = new JsonRpcProvider(RPC_URL, 1, { staticNetwork: true });
-  const walletAddress = loadWalletAddress();
+  const walletAddress = readWalletAddress();
   const contract = new Contract(CONTRACT_ADDRESS, ABI, provider);
+  const journalLines = collectJournalLines();
 
-  const [ethBalance, tokenBalance, genesisState, miningState, workerSummary] = await Promise.all([
+  const [ethBalance, tokenBalance, genesisState, miningState, latestBlock] = await Promise.all([
     provider.getBalance(walletAddress),
     contract.balanceOf(walletAddress),
     contract.genesisState(),
     contract.miningState(),
-    Promise.resolve(summarizeWorkersFromJournal())
+    provider.getBlockNumber()
   ]);
 
-  const totalMiningMinted = miningState[3];
-  const currentReward = miningState[1];
-  const estMines = currentReward > 0n ? tokenBalance / currentReward : 0n;
+  const [minted, runtime] = await Promise.all([
+    queryMintedTransfers(contract, walletAddress, latestBlock),
+    Promise.resolve(summarizeRuntimeFromJournal(journalLines))
+  ]);
 
-  const lines = [];
-  lines.push("主控总览");
-  lines.push(`主控钱包: ${walletAddress}`);
-  lines.push(`主网 RPC: ${RPC_URL}`);
-  lines.push("");
-
-  lines.push("收益情况");
-  lines.push(`钱包中 HASH 余额: ${formatEther(tokenBalance)} HASH`);
-  lines.push(`钱包中 ETH 余额: ${formatEther(ethBalance)} ETH`);
-  lines.push(`按当前单次奖励估算，累计挖到次数: ${estMines.toString()} 次`);
-  lines.push(`当前单次奖励: ${formatEther(currentReward)} HASH`);
-  lines.push("");
-
-  lines.push("Worker 状态");
-  if (workerSummary.workers.length === 0) {
-    lines.push(colorize("暂无已识别的 worker 运行数据", "red"));
-  } else {
-    const sorted = workerSummary.workers.sort((a, b) => b.哈希率数值 - a.哈希率数值 || a.IP.localeCompare(b.IP));
-    for (const worker of sorted) {
-      const ok = worker.哈希率数值 > 0;
-      const status = ok ? colorize("正常挖矿", "green") : colorize("在线但无算力", "red");
-      lines.push(
-        `${worker.IP} | ${worker.名称} | ${status} | 槽位 ${worker.槽位} | 线程 ${worker.线程} | 哈希率 ${worker.哈希率} | 已尝试 ${worker.已尝试哈希}`
-      );
+  const payload = {
+    wallet: {
+      address: walletAddress,
+      hashBalance: formatToken(tokenBalance),
+      ethBalance: formatToken(ethBalance)
+    },
+    rpcUrl: RPC_URL,
+    mined: {
+      totalHash: formatToken(minted.total),
+      mintedCount: minted.count,
+      lastMintBlock: minted.lastBlock
+    },
+    runtime: {
+      services: collectServiceState(),
+      totalHashrate: runtime.totalHashrate,
+      totalHashrateText: runtime.totalHashrate !== null ? formatHashrateFromHps(runtime.totalHashrate) : null,
+      totalHashes: runtime.totalHashes,
+      submittedTxCount: runtime.submittedTxCount,
+      confirmedTxCount: runtime.confirmedTxCount,
+      lastSubmittedTxHash: runtime.lastSubmittedTxHash,
+      lastConfirmedBlock: runtime.lastConfirmedBlock,
+      lastConfirmedAt: runtime.lastConfirmedAt,
+      lastSolutionNonce: runtime.lastSolutionNonce,
+      lastSolutionAt: runtime.lastSolutionAt,
+      lastRound: runtime.lastRound,
+      workers: runtime.workers.map(worker => ({
+        ...worker,
+        hashrateText: formatHashrateFromHps(worker.hashrate)
+      }))
+    },
+    chain: {
+      genesisComplete: genesisState[3],
+      genesisMinted: formatToken(genesisState[0]),
+      genesisEthRaised: formatToken(genesisState[2]),
+      currentReward: formatToken(miningState[1]),
+      era: miningState[0].toString(),
+      epoch: miningState[5].toString(),
+      epochBlocksLeft: miningState[6].toString(),
+      difficulty: formatDifficulty(miningState[2].toString()),
+      globalMiningMinted: formatToken(miningState[3]),
+      globalRemaining: formatToken(miningState[4])
     }
-  }
-  if (workerSummary.totalHashrate !== null) {
-    lines.push(`总哈希率: ${formatMegahashFromHashrate(workerSummary.totalHashrate)}`);
-  }
-  if (workerSummary.totalHashes !== null) {
-    lines.push(`本轮累计已尝试: ${workerSummary.totalHashes}`);
-  }
-  lines.push("");
+  };
 
-  lines.push("链上统计");
-  lines.push(`Genesis 是否完成: ${genesisState[3] ? "是" : "否"}`);
-  lines.push(`Genesis 已铸造: ${formatEther(genesisState[0])} HASH`);
-  lines.push(`Genesis 已筹集: ${formatEther(genesisState[2])} ETH`);
-  lines.push(`当前 Era: ${miningState[0].toString()}`);
-  lines.push(`当前 Epoch: ${miningState[5].toString()}`);
-  lines.push(`Epoch 剩余区块: ${miningState[6].toString()}`);
-  lines.push(`当前难度: ${formatHash(miningState[2].toString())}`);
-  lines.push(`全网已挖出: ${formatEther(totalMiningMinted)} HASH`);
-  lines.push(`全网剩余可挖: ${formatEther(miningState[4])} HASH`);
-  lines.push("");
+  if (JSON_MODE) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
 
-  lines.push("说明");
-  lines.push("钱包中 HASH 余额包含历史挖矿奖励，以及你未转出的链上余额。");
-  lines.push("累计挖到次数是按当前单次奖励倒推的估算值，Halving 后这个值仅供参考。");
-
-  console.log(lines.join("\n"));
+  console.log(renderTextReport(payload));
 }
 
 main().catch(error => {

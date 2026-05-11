@@ -239,7 +239,7 @@ function resolveMasterWallet() {
 }
 
 function formatHashrate(value) {
-  return `${value.toFixed(0)} H/s`;
+  return `${(Number(value || 0) / 1_000_000).toFixed(3)} MH/s`;
 }
 
 async function readChainState(provider, address) {

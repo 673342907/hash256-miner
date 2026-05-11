@@ -177,11 +177,19 @@ npm run report
 ```
 
 This prints:
-- all detected worker statuses
-- master wallet HASH and ETH balances
-- estimated mined reward count
+- how much this wallet has mined in total
+- confirmed mint count for this wallet
+- wallet HASH and ETH balances
+- current total hashrate and worker breakdown
+- submitted and confirmed tx counts
 - current reward, era, epoch, difficulty
 - total mining minted and remaining supply
+
+JSON output:
+
+```bash
+npm run report:json
+```
 
 ## Run the master on Ubuntu
 
@@ -229,6 +237,21 @@ npm run gpu:build
 npm run solo:gpu
 ```
 
+If you want it to run in the background and restart automatically after reboot:
+
+```bash
+chmod +x install-solo-gpu-service.sh
+./install-solo-gpu-service.sh
+```
+
+Useful service commands:
+
+```bash
+sudo systemctl status hash256-solo-gpu --no-pager -l
+sudo journalctl -u hash256-solo-gpu -f
+sudo systemctl restart hash256-solo-gpu
+```
+
 Required:
 
 - set `PRIVATE_KEY` in `.env.solo-gpu`
@@ -246,6 +269,7 @@ Defaults chosen for a single Ubuntu GPU host:
 - `GPU_LOCAL_WORK_SIZE=256`
 
 The mining rewards will be sent to the wallet derived from the `PRIVATE_KEY` in `.env.solo-gpu`.
+Master and worker hashrate logs are printed in `MH/s`.
 
 ### Run a GPU worker
 
@@ -288,6 +312,9 @@ Master template:
 
 Worker template:
 - `hash256-worker.service`
+
+Solo GPU template:
+- `hash256-solo-gpu.service`
 
 Typical Ubuntu setup:
 
