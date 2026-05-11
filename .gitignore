@@ -1,0 +1,10 @@
+node_modules/
+hash256-wallet.json
+.env
+.env.master
+.env.worker
+ips.txt
+workers.txt
+temp-deploy-key.pem
+*.pem
+hash256-ubuntu-upload.zip

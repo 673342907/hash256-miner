@@ -1,0 +1,16 @@
+[Unit]
+Description=HASH256 worker miner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hash256-miner
+EnvironmentFile=/opt/hash256-miner/.env.worker
+ExecStart=/opt/hash256-miner/start-worker.sh
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target

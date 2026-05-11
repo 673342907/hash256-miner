@@ -1,0 +1,11 @@
+[package]
+name = "hash256-native-worker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4"
+num_cpus = "1.16"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tiny-keccak = { version = "2.0", features = ["keccak"] }

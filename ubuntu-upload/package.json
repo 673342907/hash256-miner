@@ -1,0 +1,18 @@
+{
+  "name": "hash256-miner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "wallet": "node hash256-mine.mjs wallet",
+    "status": "node hash256-mine.mjs status",
+    "report": "node master-report.mjs",
+    "perf": "node perf-bench.mjs",
+    "master": "node hash256-mine.mjs master",
+    "worker": "node hash256-mine.mjs worker",
+    "mine": "node hash256-mine.mjs master"
+  },
+  "dependencies": {
+    "ethers": "^6.15.0"
+  }
+}

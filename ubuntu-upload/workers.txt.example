@@ -1,0 +1,4 @@
+# host|user|ssh_key|worker_name|threads|remote_dir
+# Example:
+# 43.110.24.90|root|/root/.ssh/worker-01.pem|worker-01|8|/opt/hash256-miner
+# 43.110.24.91|root|/root/.ssh/worker-02.pem|worker-02|16|/opt/hash256-miner
